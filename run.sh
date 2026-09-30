@@ -1,44 +1,63 @@
 #!/bin/sh
 set -e
 
-# 1. 设置路径（grok2api 默认从 /run/grok2api/config.yaml 读取）
+# 1. 设置路径
 DB_PATH="${DB_PATH:-/app/data/backend.db}"
-CONFIG_PATH="/run/grok2api/config.yaml"
+APP_CONFIG_PATH="/run/grok2api/config.yaml"
+LITESTREAM_CONFIG_PATH="/tmp/litestream.yml"
 
-# 确保目标文件夹存在
-mkdir -p /run/grok2api /app/data
+# 确保目录存在
+mkdir -p /run/grok2api /app/data /tmp
 
-# 2. 拼接 Endpoint 到 S3 URL
-if [ -n "$AWS_ENDPOINT_URL" ]; then
-    TARGET_URL="${LITESTREAM_REPLICA_URL}?endpoint=${AWS_ENDPOINT_URL}"
-else
-    TARGET_URL="${LITESTREAM_REPLICA_URL}"
-fi
-
-# 3. 生成严格匹配 grok2api 结构体的 YAML 配置文件
+# -------------------------------------------------------------
+# 2. 生成 grok2api 配置文件（包含首次启动所需的管理员账号密码）
+# -------------------------------------------------------------
 if [ -n "$CONFIG_CONTENT" ]; then
     echo "正在使用环境变量 CONFIG_CONTENT 写入配置文件..."
-    echo "$CONFIG_CONTENT" > "$CONFIG_PATH"
-elif [ ! -f "$CONFIG_PATH" ]; then
-    echo "未检测到 config.yaml，正在生成符合格式的默认配置文件..."
+    echo "$CONFIG_CONTENT" > "$APP_CONFIG_PATH"
+elif [ ! -f "$APP_CONFIG_PATH" ]; then
+    echo "未检测到 config.yaml，正在生成包含管理员账号的默认配置..."
     
     JWT_SECRET=$(head -c 32 /dev/urandom | hexxdump -e '16/1 "%02x"' 2>/dev/null || echo "default-jwt-secret-key-32bytes-long-sec!")
     ENCRYPT_KEY=$(head -c 32 /dev/urandom | base64 2>/dev/null || echo "default-encryption-key-base64-random==")
 
-    cat <<EOF > "$CONFIG_PATH"
+    cat <<EOF > "$APP_CONFIG_PATH"
 secrets:
   jwtSecret: "${JWT_SECRET}"
   credentialEncryptionKey: "${ENCRYPT_KEY}"
+bootstrapAdmin:
+  username: "admin"
+  password: "admin_password123"
 EOF
-    echo "默认配置已成功生成至 $CONFIG_PATH"
+    echo "grok2api 配置文件生成成功 (默认管理员: admin / admin_password123)"
 fi
 
-# 4. 从 Backblaze B2 还原数据库（如果存在）
-litestream restore -if-replica-exists "$DB_PATH" "$TARGET_URL" || true
+# -------------------------------------------------------------
+# 3. 生成 Litestream 配置文件（避开命令行 -exec 解析 BUG）
+# -------------------------------------------------------------
+cat <<EOF > "$LITESTREAM_CONFIG_PATH"
+dbs:
+  - path: "${DB_PATH}"
+    replicas:
+      - type: s3
+        url: "${LITESTREAM_REPLICA_URL}"
+        endpoint: "${AWS_ENDPOINT_URL}"
+EOF
 
-# 5. 启动 Litestream
-# -exec 在最前，后跟单字符串命令，末尾严格只有 DB_PATH 和 TARGET_URL
+# -------------------------------------------------------------
+# 4. 首次启动前尝试从 Backblaze B2 恢复数据库
+# -------------------------------------------------------------
+if [ -n "$AWS_ENDPOINT_URL" ]; then
+    RESTORE_URL="${LITESTREAM_REPLICA_URL}?endpoint=${AWS_ENDPOINT_URL}"
+else
+    RESTORE_URL="${LITESTREAM_REPLICA_URL}"
+fi
+
+litestream restore -if-replica-exists "$DB_PATH" "$RESTORE_URL" || true
+
+# -------------------------------------------------------------
+# 5. 启动 Litestream 并拉起 grok2api 应用
+# -------------------------------------------------------------
 exec litestream replicate \
-  -exec "/usr/local/bin/grok2api-entrypoint /app/grok2api --config $CONFIG_PATH --listen 0.0.0.0:8000" \
-  "$DB_PATH" \
-  "$TARGET_URL"
+  -config "$LITESTREAM_CONFIG_PATH" \
+  -exec "/usr/local/bin/grok2api-entrypoint /app/grok2api --config $APP_CONFIG_PATH --listen 0.0.0.0:8000"
