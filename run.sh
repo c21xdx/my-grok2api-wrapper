@@ -7,14 +7,12 @@ DB_PATH="${DB_PATH:-/app/data/backend.db}"
 APP_CONFIG_PATH="/run/grok2api/config.yaml"
 LITESTREAM_CONFIG_PATH="/tmp/litestream.yml"
 
-# 创建运行目录与数据目录
-mkdir -p /run/grok2api /app/data /tmp
-mkdir -p "$(dirname "$DB_PATH")"
-mkdir -p /app/data/media
-touch "$DB_PATH"
+# 1. 确保目录存在，并赋予完全读写权限 (777)
+mkdir -p /run/grok2api /app/data /tmp /app/data/media
+chmod -R 777 /app/data /run/grok2api /tmp
 
 # -------------------------------------------------------------
-# 1. 严格按照官方 config.example.yaml 结构生成配置
+# 2. 严格按官方规范生成 config.yaml
 # -------------------------------------------------------------
 if [ -n "$CONFIG_CONTENT" ]; then
     echo "$CONFIG_CONTENT" > "$APP_CONFIG_PATH"
@@ -96,7 +94,7 @@ EOF
 fi
 
 # -------------------------------------------------------------
-# 2. 生成 Litestream 备份配置
+# 3. 生成 Litestream 备份配置
 # -------------------------------------------------------------
 cat <<EOF > "$LITESTREAM_CONFIG_PATH"
 dbs:
@@ -108,10 +106,16 @@ dbs:
 EOF
 
 # -------------------------------------------------------------
-# 3. 恢复数据库与启动程序
+# 4. 从 Backblaze B2 还原数据库（若存在）
 # -------------------------------------------------------------
 litestream restore -if-replica-exists -config "$LITESTREAM_CONFIG_PATH" "$DB_PATH" || true
 
+# 再次确保恢复后的数据库文件具备写入权限
+chmod -R 777 /app/data
+
+# -------------------------------------------------------------
+# 5. 启动后台 Litestream 同步与主程序
+# -------------------------------------------------------------
 litestream replicate -config "$LITESTREAM_CONFIG_PATH" &
 
 exec /usr/local/bin/grok2api-entrypoint /app/grok2api --config "$APP_CONFIG_PATH"
