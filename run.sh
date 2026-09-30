@@ -113,14 +113,35 @@ mkdir -p "$DATA_DIR" "$DATA_DIR/media"
 # 1. 生成 Litestream 配置
 # ---------------------------------------------------------------
 {
+  # ── 后台巡检间隔 ──
+  # Litestream 的 L0 retention 检查每次执行 2 次 List，且无条件运行
+  # （db.go:3029/3051），与实际读写量无关。默认 15s 意味着每月约 34 万次
+  # List，远超 Backblaze B2 免费额度（Class C 2500 次/日 = 7.5 万/月）。
+  #
+  # 调大这些间隔不影响 RPO（仍由 sync-interval 决定），也不影响恢复正确性：
+  # L0 清理只删除已压实进 L1 的冗余文件（info.MaxTXID <= maxL1TXID），
+  # 留得久一些只是多占一点存储（B2/R2 均有 10GB 免费额度）。
+  echo "l0-retention: ${LS_L0_RETENTION:-30m}"
+  echo "l0-retention-check-interval: ${LS_L0_CHECK_INTERVAL:-10m}"
+
+  # 各级压实间隔必须递增，且 level 编号需从 1 起连续。
+  echo "levels:"
+  echo "  - level: 1"
+  echo "    interval: ${LS_L1_INTERVAL:-5m}"
+  echo "  - level: 2"
+  echo "    interval: ${LS_L2_INTERVAL:-1h}"
+  echo "  - level: 3"
+  echo "    interval: ${LS_L3_INTERVAL:-6h}"
+
   echo "dbs:"
   echo "  - path: \"$DB_PATH\""
   echo "    replicas:"
   echo "      - type: s3"
   echo "        url: \"$LITESTREAM_REPLICA_URL\""
   [ -n "$AWS_ENDPOINT_URL" ] && echo "        endpoint: \"$AWS_ENDPOINT_URL\""
-  # 关机时把剩余帧刷到对象存储，避免丢失最后几秒的写入
-  echo "        sync-interval: 1s"
+  # 同步间隔决定 RPO：崩溃时最多丢失这段时间内的写入。
+  # 每次同步是一次 PUT（Class A），B2 免费，R2 每月 100 万次免费。
+  echo "        sync-interval: ${LS_SYNC_INTERVAL:-1s}"
 } > "$LS_CONFIG"
 
 # ---------------------------------------------------------------

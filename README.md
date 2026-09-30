@@ -111,6 +111,45 @@ docker run --env-file .env -p 8000:8000 <镜像>
 
 ---
 
+## 对象存储 API 用量
+
+Litestream 的后台巡检会**持续调用 List，与实际流量无关**。
+官方默认参数每月约 44 万次 List，而 Backblaze B2 免费额度仅
+7.5 万次/月（Class C，2500 次/日），闲置也会超额。
+
+本项目已调整默认值：
+
+| 项目 | 官方默认 | 本项目 | 月度 List |
+|---|---|---|---:|
+| L0 清理检查（×2 List） | 15s | **10m** | 345,600 → 8,640 |
+| L1 压实 | 30s | **5m** | 86,400 → 8,640 |
+| L2 压实 | 5m | **1h** | 8,640 → 720 |
+| L3 压实 | 1h | **6h** | 720 → 120 |
+| | | **合计** | **441,390 → 18,150** |
+
+降低 96%，约占 B2 免费额度的 24%。
+
+**不影响 RPO**（仍由 `sync-interval` 决定，默认 1 秒），
+**也不影响恢复正确性** —— L0 清理只删除已压实进 L1 的冗余文件
+（`db.go` 中 `info.MaxTXID <= maxL1TXID`），保留久一些只是多占存储。
+
+需要进一步降低时，用 `LS_L0_CHECK_INTERVAL` 等变量覆盖，见 `.env.example`。
+
+### 换用 Cloudflare R2
+
+R2 的 Class B（含 List）免费额度是**每月 1000 万次**，List 完全不是问题。
+但 Class A（写入）每月 100 万次免费，而每秒同步一次约 260 万次/月会超额。
+用 R2 时建议：
+
+```bash
+LS_SYNC_INTERVAL=3s      # PUT 降到约 86 万/月，在免费额度内
+AWS_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
+```
+
+代价是 RPO 从 1 秒变成 3 秒。
+
+---
+
 ## 实现说明
 
 ### 为什么从源码构建 Litestream
