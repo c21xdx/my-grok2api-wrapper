@@ -15,7 +15,7 @@ else
     TARGET_URL="${LITESTREAM_REPLICA_URL}"
 fi
 
-# 3. 自动填充严格符合 grok2api 结构的 config.yaml
+# 3. 生成严格匹配 grok2api 结构体的 YAML 配置文件
 if [ -n "$CONFIG_CONTENT" ]; then
     echo "正在使用环境变量 CONFIG_CONTENT 写入配置文件..."
     echo "$CONFIG_CONTENT" > "$CONFIG_PATH"
@@ -26,8 +26,9 @@ elif [ ! -f "$CONFIG_PATH" ]; then
     ENCRYPT_KEY=$(head -c 32 /dev/urandom | base64 2>/dev/null || echo "default-encryption-key-base64-random==")
 
     cat <<EOF > "$CONFIG_PATH"
-jwtSecret: "${JWT_SECRET}"
-credentialEncryptionKey: "${ENCRYPT_KEY}"
+secrets:
+  jwtSecret: "${JWT_SECRET}"
+  credentialEncryptionKey: "${ENCRYPT_KEY}"
 EOF
     echo "默认配置已成功生成至 $CONFIG_PATH"
 fi
@@ -35,8 +36,8 @@ fi
 # 4. 从 Backblaze B2 还原数据库（如果存在）
 litestream restore -if-replica-exists "$DB_PATH" "$TARGET_URL" || true
 
-# 5. 启动 Litestream，并挂载拉起原应用
+# 5. 启动 Litestream，正确将 DB_PATH 和 TARGET_URL 放在 -exec 之前
 exec litestream replicate \
-  -exec "/usr/local/bin/grok2api-entrypoint /app/grok2api --config $CONFIG_PATH --listen 0.0.0.0:8000" \
   "$DB_PATH" \
-  "$TARGET_URL"
+  "$TARGET_URL" \
+  -exec "/usr/local/bin/grok2api-entrypoint /app/grok2api --config $CONFIG_PATH --listen 0.0.0.0:8000"
