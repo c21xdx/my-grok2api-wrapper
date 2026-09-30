@@ -36,8 +36,9 @@ fi
 # 4. 从 Backblaze B2 还原数据库（如果存在）
 litestream restore -if-replica-exists "$DB_PATH" "$TARGET_URL" || true
 
-# 5. 启动 Litestream，正确将 DB_PATH 和 TARGET_URL 放在 -exec 之前
+# 5. 启动 Litestream
+# -exec 在最前，后跟单字符串命令，末尾严格只有 DB_PATH 和 TARGET_URL
 exec litestream replicate \
+  -exec "/usr/local/bin/grok2api-entrypoint /app/grok2api --config $CONFIG_PATH --listen 0.0.0.0:8000" \
   "$DB_PATH" \
-  "$TARGET_URL" \
-  -exec "/usr/local/bin/grok2api-entrypoint /app/grok2api --config $CONFIG_PATH --listen 0.0.0.0:8000"
+  "$TARGET_URL"
