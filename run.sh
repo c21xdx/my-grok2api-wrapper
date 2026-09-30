@@ -6,7 +6,17 @@ DB_PATH="${DB_PATH:-/app/data/data.db}"
 CONFIG_PATH="/app/config.yaml"
 
 # -------------------------------------------------------------
-# 1. 防错逻辑：确保 config.yaml 必然存在，防止崩溃退出
+# 1. 拼接带 endpoint 的完整 S3 目标 URL
+# -------------------------------------------------------------
+# 如果 LITESTREAM_REPLICA_URL 里还没有带 ?endpoint，自动拼接上去
+if [ -n "$AWS_ENDPOINT_URL" ]; then
+    TARGET_URL="${LITESTREAM_REPLICA_URL}?endpoint=${AWS_ENDPOINT_URL}"
+else
+    TARGET_URL="${LITESTREAM_REPLICA_URL}"
+fi
+
+# -------------------------------------------------------------
+# 2. 防错逻辑：确保 config.yaml 存在
 # -------------------------------------------------------------
 if [ -n "$CONFIG_CONTENT" ]; then
     echo "正在使用环境变量 CONFIG_CONTENT 写入配置文件..."
@@ -29,10 +39,10 @@ EOF
 fi
 
 # -------------------------------------------------------------
-# 2. Litestream 还原与实时同步
+# 3. Litestream 还原与实时同步（语法修正版）
 # -------------------------------------------------------------
 # 启动时如果 Backblaze B2 里有旧备份，自动拉取还原
-litestream restore -if-replica-exists -endpoint "$AWS_ENDPOINT_URL" "$DB_PATH" "$LITESTREAM_REPLICA_URL" || true
+litestream restore -if-replica-exists "$DB_PATH" "$TARGET_URL" || true
 
 # 启动 Litestream 监控，并接管拉起原程序
-exec litestream replicate -endpoint "$AWS_ENDPOINT_URL" -exec "/usr/local/bin/grok2api-entrypoint /app/grok2api --config $CONFIG_PATH --listen 0.0.0.0:8000" "$DB_PATH" "$LITESTREAM_REPLICA_URL"
+exec litestream replicate -exec "/usr/local/bin/grok2api-entrypoint /app/grok2api --config $CONFIG_PATH --listen 0.0.0.0:8000" "$DB_PATH" "$TARGET_URL"
