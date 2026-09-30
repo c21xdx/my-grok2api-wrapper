@@ -33,27 +33,49 @@ head -c 32 /dev/urandom | base64 | tr -d '/+='
 **这是最重要的一个值。** 所有密钥都由它派生，丢了等于所有已存账号凭据报废。
 存进密码管理器。
 
-### 3. 部署
+### 3. 填写 .env
 
-把本仓库 fork/推到 GitHub，在平台上创建 Docker 服务，设置环境变量：
+```bash
+cp .env.example .env
+```
 
-| 变量 | 必需 | 说明 |
-|---|:--:|---|
-| `LITESTREAM_REPLICA_URL` | ✅ | `s3://<bucket>/<前缀>` |
-| `LITESTREAM_ACCESS_KEY_ID` | ✅ | 对象存储密钥 ID |
-| `LITESTREAM_SECRET_ACCESS_KEY` | ✅ | 对象存储密钥 |
-| `AWS_ENDPOINT_URL` | 除 AWS 外 | S3 端点 URL |
-| `MASTER_KEY` | ✅ | 步骤 2 生成 |
-| `PORT` | — | 多数平台自动注入 |
-| `ADMIN_PASSWORD` | — | 不设则由 MASTER_KEY 派生 |
-| `ADMIN_USERNAME` | — | 默认 `admin` |
-| `SECURE_COOKIES` | — | 默认 `true`；仅本地 HTTP 测试时设 `false` |
-| `AUDIT_RETENTION_DAYS` | — | 默认 `2` |
-| `CONFIG_CONTENT` | — | 完整 config.yaml，设置后覆盖自动生成 |
+必填 5 项：`MASTER_KEY`、`LITESTREAM_REPLICA_URL`、两个密钥、`AWS_ENDPOINT_URL`。
+其余都有默认值，可以不管。
+
+> `.env` 已在 `.gitignore` 中，不要提交。
+
+### 4. 部署
+
+把仓库推到 GitHub，在平台创建 Docker 服务，然后用以下**任一**方式提供配置：
+
+**方式 A — 单个环境变量**（推荐，Render / Koyeb 等都适用）
+
+新建变量 `ENV_FILE_CONTENT`，把整个 `.env` 内容**原样粘贴**进去。
+只需配这一个变量。
+
+**方式 B — Secret File**
+
+把 `.env` 挂到 `/etc/secrets/.env`。
+Render 的 Secret Files、Koyeb 的 File Mounts 都支持。
+也可用 `ENV_FILE` 指定其他路径。
+
+**方式 C — 逐个设置**
+
+按 `.env.example` 里的键名一个个填环境变量。
+
+**本地**
+
+```bash
+docker run --env-file .env -p 8000:8000 <镜像>
+```
+
+> 优先级：环境变量 > `.env` 文件。平台注入的 `PORT` 始终生效，
+> 不会被文件里的值覆盖。
 
 首次启动日志会打印管理员密码。
 
-### 4. 验证持久化
+
+### 5. 验证持久化
 
 **务必做这一步**，否则不知道复制是否真的生效：
 
@@ -121,12 +143,14 @@ grok2api 的相对路径以**配置文件所在目录**为基准解析
 ```bash
 docker build -t g2a .
 mkdir -p /tmp/rep
-docker run --rm -p 8000:8000 \
-  -v /tmp/rep:/replica \
-  -e LITESTREAM_REPLICA_URL=file:///replica/db \
-  -e MASTER_KEY=local-test-key \
-  -e SECURE_COOKIES=false \
-  g2a
+
+cat > .env.local <<'EOF'
+MASTER_KEY=local-test-key
+LITESTREAM_REPLICA_URL=file:///replica/db
+SECURE_COOKIES=false
+EOF
+
+docker run --rm -p 8000:8000 -v /tmp/rep:/replica --env-file .env.local g2a
 ```
 
 `file://` 副本便于快速验证，无需真实对象存储。

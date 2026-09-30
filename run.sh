@@ -4,21 +4,29 @@
 # 适用于任何无持久存储的容器平台（Render / Koyeb / Fly / Railway 等）。
 # 通过 S3 兼容对象存储持久化 SQLite。
 #
-# 必需环境变量：
+# 配置方式（三选一，优先级从高到低）：
+#   1. 直接设置环境变量
+#   2. ENV_FILE_CONTENT 变量：整个 .env 的内容放在一个变量里
+#      （适合 Render / Koyeb 等只给环境变量的平台）
+#   3. .env 文件：挂载到 /etc/secrets/.env、/app/.env 或 ENV_FILE 指定的路径
+#
+# 必需：
 #   LITESTREAM_REPLICA_URL        s3://bucket/prefix
 #   LITESTREAM_ACCESS_KEY_ID      访问密钥
 #   LITESTREAM_SECRET_ACCESS_KEY  密钥
+#   MASTER_KEY                    主密钥，所有密钥由它派生，务必固定
 #   AWS_ENDPOINT_URL              S3 端点（AWS 官方可省略）
 #
 # 可选：
-#   PORT                默认 8000，多数 PaaS 会自动注入
-#   ADMIN_PASSWORD      初始管理员密码，不设则随机生成并打印
-#   CONFIG_CONTENT      完整 config.yaml 内容，设置后覆盖自动生成
+#   PORT ADMIN_PASSWORD ADMIN_USERNAME SECURE_COOKIES
+#   AUDIT_RETENTION_DAYS CONFIG_CONTENT
+#
+# 完整说明见 README.md 与 .env.example
 set -e
 
 APP_DIR=/app
-# 配置与数据库同放 data/ —— 该目录会被 Litestream 覆盖，
-# 使 credentialEncryptionKey 在重启后保持不变。
+# 配置与数据库同放 data/，便于统一管理。注意 Litestream 只复制数据库文件，
+# 配置不会被备份 —— 密钥的稳定性由 MASTER_KEY 派生保证，而非靠配置持久化。
 DATA_DIR="${DATA_DIR:-/app/data}"
 DB_PATH="${DB_PATH:-$DATA_DIR/backend.db}"
 CONFIG_PATH="$DATA_DIR/config.yaml"
@@ -27,6 +35,66 @@ PORT="${PORT:-8000}"
 
 log() { echo "[wrapper] $*"; }
 die() { echo "[wrapper] 错误: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------
+# 0. 加载 .env
+# ---------------------------------------------------------------
+# 已存在的环境变量优先级更高，不会被文件覆盖
+# （平台注入的 PORT 等应当胜出）。
+parse_env() {
+  _src="$1"
+  _count=0
+  while IFS= read -r _raw || [ -n "$_raw" ]; do
+    # 去掉行首空白与可选的 export 前缀
+    _line=$(printf '%s' "$_raw" | sed 's/^[[:space:]]*//; s/^export[[:space:]]\{1,\}//')
+    case "$_line" in
+      ''|'#'*) continue ;;
+      *=*) ;;
+      *) continue ;;
+    esac
+
+    _key=$(printf '%s' "${_line%%=*}" | sed 's/[[:space:]]*$//')
+    _val="${_line#*=}"
+
+    case "$_key" in
+      ''|*[!A-Za-z0-9_]*)
+        log "跳过非法变量名: $_key"; continue ;;
+    esac
+
+    # 按引号形态处理值
+    case "$_val" in
+      \"*\")
+        _val="${_val#\"}"; _val="${_val%\"}" ;;
+      \'*\')
+        _val="${_val#\'}"; _val="${_val%\'}" ;;
+      *)
+        # 无引号：去掉行尾注释与空白
+        _val=$(printf '%s' "$_val" | sed 's/[[:space:]]\{1,\}#.*$//; s/[[:space:]]*$//') ;;
+    esac
+
+    # 已设置则跳过
+    if [ -n "$(eval printf '%s' "\"\${$_key:-}\"")" ]; then
+      continue
+    fi
+    export "$_key=$_val"
+    _count=$((_count + 1))
+  done <<PARSE_EOF
+$_src
+PARSE_EOF
+  log "已加载 $_count 个变量"
+}
+
+if [ -n "$ENV_FILE_CONTENT" ]; then
+  log "从 ENV_FILE_CONTENT 读取配置"
+  parse_env "$ENV_FILE_CONTENT"
+else
+  for _f in "$ENV_FILE" /etc/secrets/.env /app/.env ./.env; do
+    [ -n "$_f" ] && [ -f "$_f" ] || continue
+    log "加载 $_f"
+    parse_env "$(cat "$_f")"
+    break
+  done
+fi
 
 # ---------------------------------------------------------------
 # 0. 前置检查
