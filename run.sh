@@ -6,11 +6,13 @@ DB_PATH="${DB_PATH:-/app/data/backend.db}"
 APP_CONFIG_PATH="/run/grok2api/config.yaml"
 LITESTREAM_CONFIG_PATH="/tmp/litestream.yml"
 
-# 确保目录存在
+# 确保所有目录存在，并创建空的数据库文件（防止 Litestream 初始化超时锁死）
 mkdir -p /run/grok2api /app/data /tmp
+mkdir -p "$(dirname "$DB_PATH")"
+touch "$DB_PATH"
 
 # -------------------------------------------------------------
-# 2. 生成 grok2api 配置文件（包含首次启动所需的管理员账号密码）
+# 2. 生成 grok2api 配置文件
 # -------------------------------------------------------------
 if [ -n "$CONFIG_CONTENT" ]; then
     echo "正在使用环境变量 CONFIG_CONTENT 写入配置文件..."
@@ -33,7 +35,7 @@ EOF
 fi
 
 # -------------------------------------------------------------
-# 3. 生成 Litestream 配置文件（避开命令行 -exec 解析 BUG）
+# 3. 生成 Litestream 配置文件
 # -------------------------------------------------------------
 cat <<EOF > "$LITESTREAM_CONFIG_PATH"
 dbs:
@@ -56,8 +58,10 @@ fi
 litestream restore -if-replica-exists "$DB_PATH" "$RESTORE_URL" || true
 
 # -------------------------------------------------------------
-# 5. 启动 Litestream 并拉起 grok2api 应用
+# 5. 启动 Litestream 后台备份进程 + 启动 grok2api 主应用
 # -------------------------------------------------------------
-exec litestream replicate \
-  -config "$LITESTREAM_CONFIG_PATH" \
-  -exec "/usr/local/bin/grok2api-entrypoint /app/grok2api --config $APP_CONFIG_PATH --listen 0.0.0.0:8000"
+echo "正在启动 Litestream 实时备份守护进程..."
+litestream replicate -config "$LITESTREAM_CONFIG_PATH" &
+
+echo "正在启动 grok2api 应用..."
+exec /usr/local/bin/grok2api-entrypoint /app/grok2api --config "$APP_CONFIG_PATH" --listen 0.0.0.0:8000
