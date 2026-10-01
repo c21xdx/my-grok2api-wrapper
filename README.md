@@ -16,7 +16,7 @@ Dockerfile + 环境变量的平台。
 
 | 服务 | 免费额度 | 端点格式 |
 |---|---|---|
-| Backblaze B2 | 10GB 存储，API 调用免费 | `https://s3.<region>.backblazeb2.com` |
+| Backblaze B2 | 10GB 存储，各 class 2500 次/天 | `https://s3.<region>.backblazeb2.com` |
 | Cloudflare R2 | 10GB 存储，出站免费 | `https://<account>.r2.cloudflarestorage.com` |
 | 其他 S3 兼容 | — | 自填 |
 
@@ -113,40 +113,63 @@ docker run --env-file .env -p 8000:8000 <镜像>
 
 ## 对象存储 API 用量
 
-Litestream 的后台巡检会**持续调用 List，与实际流量无关**。
-官方默认参数每月约 44 万次 List，而 Backblaze B2 免费额度仅
-7.5 万次/月（Class C，2500 次/日），闲置也会超额。
+Backblaze B2 免费账号对**每个 class 每天 2500 次**调用，按天重置：
+
+| Class | 对应操作 | Litestream 的用法 |
+|---|---|---|
+| **A** | `PutObject` `DeleteObject` `UploadPart` | 上传 LTX 帧、删除过期文件 |
+| **B** | `GetObject` `HeadObject` | 仅恢复时下载（平时为 0） |
+| **C** | `ListObjectsV2` `CopyObject` `HeadBucket` | 后台巡检，**瓶颈在这里** |
+
+Class C 是瓶颈，因为 Litestream 的后台巡检**与实际流量无关**，
+闲置也照跑。官方默认参数每天约 14,700 次，远超 2500 的上限。
 
 本项目已调整默认值：
 
-| 项目 | 官方默认 | 本项目 | 月度 List |
+| 项目 | 官方默认 | 本项目 | 每日 List |
 |---|---|---|---:|
-| L0 清理检查（×2 List） | 15s | **10m** | 345,600 → 8,640 |
-| L1 压实 | 30s | **5m** | 86,400 → 8,640 |
-| L2 压实 | 5m | **1h** | 8,640 → 720 |
-| L3 压实 | 1h | **6h** | 720 → 120 |
-| | | **合计** | **441,390 → 18,150** |
+| L0 清理检查（每次 2 次 List） | 15s | **10m** | 11,520 → 288 |
+| L1 压实 | 30s | **5m** | 2,880 → 288 |
+| L2 压实 | 5m | **1h** | 288 → 24 |
+| L3 压实 | 1h | **6h** | 24 → 4 |
+| snapshot | 24h | 24h | 1 |
+| | | **合计** | **14,712 → 605** |
 
-降低 96%，约占 B2 免费额度的 24%。
+降低 96%，约占每日额度的 **24%**。
 
 **不影响 RPO**（仍由 `sync-interval` 决定，默认 1 秒），
 **也不影响恢复正确性** —— L0 清理只删除已压实进 L1 的冗余文件
 （`db.go` 中 `info.MaxTXID <= maxL1TXID`），保留久一些只是多占存储。
 
+### 关于 Class A（上传）
+
+`sync-interval: 1s` **不等于每秒一次 PUT**。Litestream 的同步循环
+（`replica.go:207`）只在数据库有新事务时才上传：
+
+```go
+for txID := r.Pos().TXID+1; txID <= dpos.TXID; txID = ... {
+    r.uploadLTXFile(...)   // 无新事务则循环不执行
+}
+```
+
+闲置时为 0。个人低频使用（每天几十次对话）通常每天几百次 PUT，
+在 2500 内。若 Class A 接近上限，调大 `LS_SYNC_INTERVAL`（如 `3s`）
+可成比例降低，代价是 RPO 变长。
+
 需要进一步降低时，用 `LS_L0_CHECK_INTERVAL` 等变量覆盖，见 `.env.example`。
 
 ### 换用 Cloudflare R2
 
-R2 的 Class B（含 List）免费额度是**每月 1000 万次**，List 完全不是问题。
-但 Class A（写入）每月 100 万次免费，而每秒同步一次约 260 万次/月会超额。
-用 R2 时建议：
+R2 的 Class B（含 List）免费额度是**每月 1000 万次**，List 完全不是问题；
+Class A（写入）每月 100 万次免费。按实际写入量计，个人使用远在额度内。
+若写入频繁可适当调大同步间隔：
 
 ```bash
-LS_SYNC_INTERVAL=3s      # PUT 降到约 86 万/月，在免费额度内
 AWS_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
+#LS_SYNC_INTERVAL=3s     # 仅在 Class A 接近上限时才需要
 ```
 
-代价是 RPO 从 1 秒变成 3 秒。
+R2 没有每日上限，额度按月计，对低频个人使用更宽松。
 
 ---
 
